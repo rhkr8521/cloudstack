@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail  # 안전한 실행 설정
+set -euo pipefail
 trap 'echo "An error occurred. Exiting..."; exit 1;' ERR
 
 if [ "$EUID" -ne 0 ]; then
@@ -9,7 +9,6 @@ if [ "$EUID" -ne 0 ]; then
   ##  before running the script switch to root user using <su> or <sudo su>  ##
   #############################################################################
   "
-  sleep 15
   exit 1
 fi
 
@@ -21,27 +20,8 @@ if [[ ! "$UBUNTU_VERSION" =~ ^(20\.|22\.) ]]; then
   ##         This script requires Ubuntu version 22.04 or 20.xx             ##   
   #############################################################################
   "
-  sleep 15
   exit 1
 fi
-
-# 초기 정보 출력
-echo -e "
- ██████╗ ███████╗██╗    ██╗ █████╗ ███╗   ██╗███████╗   ███╗   ██╗███████╗██╗  ██╗██████╗  █████╗ 
- ██╔══██╗██╔════╝██║    ██║██╔══██╗████╗  ██║██╔════╝   ████╗  ██║██╔════╝██║  ██║██╔══██╗██╔══██╗ 
- ██║  ██║█████╗  ██║ █╗ ██║███████║██╔██╗ ██║███████╗   ██╔██╗ ██║█████╗  ███████║██████╔╝███████║ 
- ██║  ██║██╔══╝  ██║███╗██║██╔══██║██║╚██╗██║╚════██║   ██║╚██╗██║██╔══╝  ██╔══██║██╔══██╗██╔══██║
- ██████╔╝███████╗╚███╔███╔╝██║  ██║██║ ╚████║███████║   ██║ ╚████║███████╗██║  ██║██║  ██║██║  ██║ 
- ╚═════╝ ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝   ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝  
-"
-echo -e "
-###################################################################################
-####           This script is written by Dewans Nehra.                        ####
-####           You can contact me at https://dewansnehra.xyz                  ####
-####           This script is written for Ubuntu 22.04                        ####
-####           This script will install Cloudstack 4.18                       ####
-###################################################################################
-"
 
 echo "Updating system packages..."
 apt update && apt upgrade -y
@@ -74,7 +54,7 @@ else
 fi
 
 # Netplan 설정
-NETPLAN_FILE="/etc/netplan/99-cloudstack.yaml"
+NETPLAN_FILE="/etc/netplan/99-cloud-init.yaml"
 NETPLAN_CONTENT="network:
   version: 2
   renderer: networkd
@@ -90,6 +70,8 @@ NETPLAN_CONTENT="network:
       nameservers:
         addresses: [8.8.8.8, 8.8.4.4]"
 
+echo "Applying Netplan configuration..."
+cp $NETPLAN_FILE "${NETPLAN_FILE}.bak" 2>/dev/null || true
 echo "$NETPLAN_CONTENT" | tee $NETPLAN_FILE
 netplan apply || {
   echo "Netplan configuration failed. Restoring original interface settings..."
@@ -102,22 +84,27 @@ netplan apply || {
 hostnamectl set-hostname devil.dewansnehra.xyz
 
 # CloudStack 설치
-echo "Installing CloudStack dependencies..."
-apt-get install -y openntpd openssh-server sudo vim htop tar intel-microcode mysql-server
-
-# CloudStack 저장소 추가
-echo "Configuring CloudStack repository..."
+echo "Configuring CloudStack repository and GPG key..."
 if [[ "$UBUNTU_VERSION" == "20."* ]]; then
-  echo deb [arch=amd64] http://download.cloudstack.org/ubuntu focal 4.18 > /etc/apt/sources.list.d/cloudstack.list
+  echo "deb [arch=amd64] http://download.cloudstack.org/ubuntu focal 4.18" > /etc/apt/sources.list.d/cloudstack.list
 elif [[ "$UBUNTU_VERSION" == "22."* ]]; then
-  echo deb [arch=amd64] http://download.cloudstack.org/ubuntu jammy 4.18 > /etc/apt/sources.list.d/cloudstack.list
+  echo "deb [arch=amd64] http://download.cloudstack.org/ubuntu jammy 4.18" > /etc/apt/sources.list.d/cloudstack.list
 fi
 
-wget -qO - http://download.cloudstack.org/release.asc | gpg --dearmor -o /usr/share/keyrings/cloudstack-archive-keyring.gpg
-apt update && apt install -y cloudstack-management cloudstack-usage
+wget -qO- https://downloads.apache.org/cloudstack/KEYS | gpg --dearmor -o /usr/share/keyrings/cloudstack-archive-keyring.gpg
+
+cat <<EOF | tee /etc/apt/sources.list.d/cloudstack.list
+deb [signed-by=/usr/share/keyrings/cloudstack-archive-keyring.gpg arch=amd64] http://download.cloudstack.org/ubuntu jammy 4.18
+EOF
+
+apt update
+
+echo "Installing CloudStack management and usage packages..."
+apt install -y cloudstack-management cloudstack-usage
 
 # MySQL 설정
 echo "Configuring MySQL for CloudStack..."
+apt-get install -y mysql-server
 cat <<EOF | tee -a /etc/mysql/mysql.conf.d/mysqld.cnf
 [mysqld]
 server_id=1
@@ -132,14 +119,14 @@ EOF
 systemctl restart mysql
 
 mysql -u root -e "
-ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'dewansnehra';
+ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'password';
 FLUSH PRIVILEGES;
 "
 
-cloudstack-setup-databases root:dewansnehra@localhost --deploy-as=root:dewansnehra
+cloudstack-setup-databases root:password@localhost --deploy-as=root:password
 cloudstack-setup-management
 
-# NFS 구성
+# NFS 설정
 echo "Setting up NFS..."
 apt install -y nfs-kernel-server
 mkdir -p /export/{primary,secondary}
@@ -147,11 +134,11 @@ echo "/export *(rw,async,no_root_squash,no_subtree_check)" | tee -a /etc/exports
 exportfs -r
 systemctl restart nfs-server
 
-# 완료 메시지
 echo "
 ###################################################################################
-####           Installation done. You can go to http://localhost:8080          ####
-####           Username : admin                                                ####
-####           Password : password                                             ####
+####           Installation completed. Access CloudStack at:                 ####
+####           http://localhost:8080                                         ####
+####           Username: admin                                               ####
+####           Password: password                                            ####
 ###################################################################################
 "
